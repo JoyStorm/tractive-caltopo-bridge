@@ -26,8 +26,15 @@ Tractive collar  ->  Tractive cloud  ->  bridge (this repo)  ->  CalTopo live tr
 
 In CalTopo: map → add **live track** → Track Details → Type
 `Fleet, Email, Other`. The **Call Sign** is the routing key — CalTopo splits it
-at the first hyphen as `{GROUP}-{DEVICE}` (e.g. `54K9-Storm`). The **Label** is
-what shows on the map, independent of the call sign.
+at the first hyphen as `{GROUP}-{DEVICE}` (e.g. `TEAM1-Dog7k2q`). The **Label**
+is what shows on the map, independent of the call sign.
+
+**Treat the call sign as a secret.** CalTopo's position-report endpoint has no
+authentication — anyone who knows the call sign can add a live track with it
+to their own map and watch the dog (and the handler) in real time. Use an
+unguessable device ID (add a random suffix — the map **Label** can still just
+say the dog's name), never commit the real call sign anywhere public, and
+rotate it if it leaks.
 
 Save the track **before** sending positions — reports fired before the track is
 saved don't bind to it. The same call sign can be added to any number of maps;
