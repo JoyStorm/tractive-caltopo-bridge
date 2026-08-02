@@ -1,78 +1,89 @@
 # tractive-caltopo-bridge
 
-Put a dog's Tractive GPS collar on a live CalTopo map.
+Put a SAR dog's Tractive GPS collar on a live CalTopo map — **only while
+you're actually deployed.**
 
 Search-and-rescue teams run their incident maps in [CalTopo](https://caltopo.com).
 A K9's Tractive collar only shows position inside the Tractive app — visible to
-the handler, invisible to the team. This bridge polls the collar through
-Tractive's app API and reports each new fix to a CalTopo live track, so the dog
-draws a real track on the same map the team is already using.
+the handler, invisible to the team. This bridge relays the collar's fixes to a
+CalTopo live track, so the dog draws a real track on the map the team is
+already using.
+
+## The switch: Tractive LIVE mode
+
+The bridge is **off by default** and posts nothing. Tractive's own LIVE
+tracking is the on/off switch:
+
+- **Start a deployment:** turn LIVE on in the Tractive app (or run
+  `bridge.py --on`). The bridge notices within seconds and starts relaying
+  every fix to CalTopo.
+- **End a deployment:** turn LIVE off (or `bridge.py --off`). The feed goes
+  silent.
+
+This means the handler's existing muscle memory — opening Tractive on a
+callout — is the control surface. No extra app, no dashboard, works at 3am.
+
+Two protections are built in:
+
+- The bridge re-asserts LIVE during a deployment (Tractive times it out after
+  ~5 minutes otherwise), so a deployment started remotely stays on.
+- A hard cap (`MAX_LIVE_SECONDS`, default 8h) turns LIVE off if someone
+  forgets, because LIVE drains the collar battery in hours, not days.
 
 ## How it works
 
 ```
-Tractive collar  ->  Tractive cloud  ->  bridge (this repo)  ->  CalTopo live track
+Tractive collar -> Tractive event channel (push) -> bridge -> CalTopo live track
 ```
 
-- Polls the collar's latest fix via [aiotractive](https://github.com/zhulik/aiotractive)
-  (the reverse-engineered app API — Tractive publishes no official one).
-- Posts to CalTopo's position-report endpoint:
-  `https://caltopo.com/api/v1/position/report/{GROUP}?id={DEVICE}&lat=..&lng=..`
-  (plain GET, no auth).
-- Only posts when the fix **timestamp** changes — sparse collar updates never
-  become duplicate points.
+- Holds Tractive's real-time channel open via
+  [aiotractive](https://github.com/zhulik/aiotractive) (the reverse-engineered
+  app API — Tractive publishes no official one). Positions and LIVE-state
+  changes arrive pushed; there is no polling loop.
+- Posts to CalTopo's position-report endpoint
+  (`https://caltopo.com/api/v1/position/report/{GROUP}?id={DEVICE}&lat=..&lng=..`)
+  only when the fix timestamp changes — no duplicate points.
 
 ## CalTopo setup (once per map)
 
 In CalTopo: map → add **live track** → Track Details → Type
 `Fleet, Email, Other`. The **Call Sign** is the routing key — CalTopo splits it
-at the first hyphen as `{GROUP}-{DEVICE}` (e.g. `TEAM1-Dog7k2q`). The **Label**
-is what shows on the map, independent of the call sign.
+at the first hyphen as `{GROUP}-{DEVICE}` (e.g. `TEAM1-Dog`). The **Label** is
+what shows on the map, independent of the call sign.
 
-**Treat the call sign as a secret.** CalTopo's position-report endpoint has no
-authentication — anyone who knows the call sign can add a live track with it
-to their own map and watch the dog (and the handler) in real time. Use an
-unguessable device ID (add a random suffix — the map **Label** can still just
-say the dog's name), never commit the real call sign anywhere public, and
-rotate it if it leaks.
+Notes learned in the field:
 
-Save the track **before** sending positions — reports fired before the track is
-saved don't bind to it. The same call sign can be added to any number of maps;
-the bridge doesn't know or care which maps subscribe.
-
-## Idle vs. live
-
-A Tractive collar normally reports minutes apart (stretching further when the
-dog is still) to save battery. Polling faster than the collar reports just
-returns the same stale fix.
-
-- **idle** (default): slow poll, collar cadence untouched. Always-on safe.
-- **live** (`--live` or `MODE=live`): enables Tractive LIVE tracking — a fix
-  every few seconds, at the cost of collar battery measured in **hours, not
-  days**. Use during a deployment, turn off after. The bridge disables LIVE
-  mode on shutdown.
+- Save the track **before** positions arrive — earlier reports don't bind, and
+  tracks do **not** backfill. Add the track early in an incident.
+- Any team member can add the call sign to their own map; the bridge doesn't
+  know or care how many maps subscribe.
+- The endpoint has no authentication — the call sign is the only routing
+  secret. Off-by-default means it only matters during a deployment, but still
+  don't publish your real one.
 
 ## Running
 
 ```sh
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env   # fill in credentials + call sign
-.venv/bin/python bridge.py            # idle mode
-.venv/bin/python bridge.py --live     # search mode
-.venv/bin/python bridge.py --once     # single fix, then exit (smoke test)
+cp .env.example .env    # fill in credentials + call sign
+.venv/bin/python bridge.py            # the relay worker (deploy this)
+.venv/bin/python bridge.py --status   # LIVE state + last fix
+.venv/bin/python bridge.py --on       # start a deployment
+.venv/bin/python bridge.py --off      # end a deployment
+.venv/bin/python bridge.py --once     # post one fix (test the CalTopo side)
 ```
 
-Credentials are the Tractive app login — there are no API keys. Keep them in
-`.env` (gitignored) locally, or in your host's environment-variable settings in
-production. Never commit them.
+Credentials are the Tractive app login — keep them in `.env` (gitignored)
+locally or your host's environment-variable settings in production. Never
+commit them.
 
 ### Deploying (Sevalla or any worker host)
 
-Runs as a plain long-lived process — e.g. a
-[Sevalla](https://sevalla.com) **Background Worker** deployed from this repo,
-with the `.env.example` variables set in the host's environment UI.
-Start command: `python bridge.py` (set `MODE=live` and restart for a search,
-or run a second worker in live mode only during deployments).
+The worker is a plain long-lived process — e.g. a
+[Sevalla](https://sevalla.com) **Background Worker** deployed from this repo
+(the `Procfile` provides the start command; Nixpacks needs it). Set the
+`.env.example` variables in the host's environment UI. The worker itself is
+always running; whether it *reports* is governed entirely by LIVE mode.
 
 ## License
 
