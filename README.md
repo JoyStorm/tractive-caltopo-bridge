@@ -89,7 +89,15 @@ cp .env.example .env    # fill in credentials + call sign
 .venv/bin/python bridge.py --on       # start a deployment
 .venv/bin/python bridge.py --off      # end a deployment
 .venv/bin/python bridge.py --once     # post one fix (test the CalTopo side)
+.venv/bin/python bridge.py --export yesterday   # a day's track as GPX
 ```
+
+`--export` pulls a day's recorded positions from Tractive's stored history
+(`today | yesterday | yymmdd | YYYY-MM-DD`; `--out PATH` to choose the file).
+The collar records fixes even with no cell service and uploads them once it's
+back in coverage — so a search in a dead zone, where live tracking couldn't
+work at all, can still be recovered afterward as a GPX file to share or
+import wherever you choose. Nothing touches any CalTopo map.
 
 Credentials are the Tractive app login — keep them in `.env` (gitignored)
 locally or your host's environment-variable settings in production. Never

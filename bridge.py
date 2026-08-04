@@ -23,11 +23,19 @@ MAX_LIVE_SECONDS to add a hard battery-protection cap (0 = none, the
 default; the collar battery itself is the natural limit).
 
 Commands:
-  bridge.py           run the relay worker (deploy this)
-  bridge.py --on      start a deployment: enable LIVE tracking, then exit
-  bridge.py --off     end a deployment: disable LIVE tracking, then exit
-  bridge.py --status  show LIVE state and last known position, then exit
-  bridge.py --once    post the latest fix to CalTopo once (test), then exit
+  bridge.py                run the relay worker (deploy this)
+  bridge.py --on           start a deployment: enable LIVE tracking, then exit
+  bridge.py --off          end a deployment: disable LIVE tracking, then exit
+  bridge.py --status       show LIVE state and last known position, then exit
+  bridge.py --once         post the latest fix to CalTopo once (test), then exit
+  bridge.py --export DATE  export a day's recorded positions as a GPX file.
+                           DATE = today | yesterday | yymmdd | YYYY-MM-DD.
+                           Pulls from Tractive's stored history, so it works
+                           even for days with no cell coverage in the field —
+                           the collar uploads its offline fixes once it's back
+                           in coverage. Writes {DEVICE_ID}-{yymmdd}.gpx (or
+                           --out PATH). The file is yours to share or import;
+                           nothing touches any CalTopo map.
 
 Configuration via environment variables (see .env.example).
 """
@@ -39,7 +47,7 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -205,6 +213,62 @@ class Bridge:
 
     # ---- one-shot commands ------------------------------------------------
 
+    def parse_export_date(self, spec: str) -> datetime:
+        tz = ZoneInfo(self.tz)
+        today = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        if spec == "today":
+            return today
+        if spec == "yesterday":
+            return today - timedelta(days=1)
+        for fmt in ("%y%m%d", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(spec, fmt).replace(tzinfo=tz)
+            except ValueError:
+                continue
+        sys.exit(f"Unrecognized date {spec!r} — use today, yesterday, yymmdd, or YYYY-MM-DD")
+
+    async def export(self, spec: str, out: str | None) -> None:
+        day = self.parse_export_date(spec)
+        t_from, t_to = day.timestamp(), (day + timedelta(days=1)).timestamp()
+        async with Tractive(self.email, self.password) as client:
+            tracker = await self.resolve_tracker(client)
+            data = await tracker.positions(t_from, t_to, "json_segments")
+
+        segments = data if isinstance(data, list) else data.get("positions", [])
+        if segments and isinstance(segments[0], dict):
+            segments = [segments]  # flat list of points -> one segment
+        points = sum(len(s) for s in segments)
+        if not points:
+            sys.exit(f"No recorded positions for {day.date()} — nothing to export.")
+
+        def trkpt(p: dict) -> str:
+            lat, lng = p["latlong"][0], p["latlong"][1]
+            iso = datetime.fromtimestamp(p["time"], tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            ele = f"<ele>{p['alt']}</ele>" if p.get("alt") is not None else ""
+            return f'      <trkpt lat="{lat}" lon="{lng}">{ele}<time>{iso}</time></trkpt>'
+
+        name = f"{self.device_base}-{day.strftime('%y%m%d')}"
+        segs = "\n".join(
+            "    <trkseg>\n" + "\n".join(trkpt(p) for p in seg if p.get("latlong")
+                                         and p.get("time")) + "\n    </trkseg>"
+            for seg in segments if seg
+        )
+        gpx = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<gpx version="1.1" creator="tractive-caltopo-bridge" '
+            'xmlns="http://www.topografix.com/GPX/1/1">\n'
+            f"  <trk>\n    <name>{name}</name>\n{segs}\n  </trk>\n</gpx>\n"
+        )
+        path = os.path.abspath(out or f"{name}.gpx")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(gpx)
+        first = datetime.fromtimestamp(segments[0][0]["time"], tz=ZoneInfo(self.tz))
+        last = datetime.fromtimestamp(segments[-1][-1]["time"], tz=ZoneInfo(self.tz))
+        print(f"Exported {points} points across {len(segments)} segment(s), "
+              f"{first.strftime('%H:%M')}–{last.strftime('%H:%M %Z')} on {day.date()}")
+        print(path)
+
     async def command(self, mode: str) -> None:
         async with Tractive(self.email, self.password) as client:
             tracker = await self.resolve_tracker(client)
@@ -247,11 +311,19 @@ async def main() -> None:
     group.add_argument("--off", action="store_true", help="end a deployment (disable LIVE)")
     group.add_argument("--status", action="store_true", help="show LIVE state + last fix")
     group.add_argument("--once", action="store_true", help="post latest fix once (test)")
+    group.add_argument("--export", metavar="DATE",
+                       help="export a day's positions as GPX "
+                            "(today | yesterday | yymmdd | YYYY-MM-DD)")
+    parser.add_argument("--out", metavar="PATH",
+                        help="output file for --export (default {DEVICE_ID}-{yymmdd}.gpx)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     bridge = Bridge()
 
+    if args.export:
+        await bridge.export(args.export, args.out)
+        return
     if args.on or args.off or args.status or args.once:
         mode = "on" if args.on else "off" if args.off else "status" if args.status else "once"
         await bridge.command(mode)
