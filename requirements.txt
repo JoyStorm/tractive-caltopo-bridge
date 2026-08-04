@@ -1,3 +1,4 @@
 aiotractive>=1.0.3
 aiohttp>=3.9
 python-dotenv>=1.0
+tzdata>=2024.1

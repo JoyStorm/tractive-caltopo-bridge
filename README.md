@@ -30,6 +30,22 @@ Two protections are built in:
 - A hard cap (`MAX_LIVE_SECONDS`, default 8h) turns LIVE off if someone
   forgets, because LIVE drains the collar battery in hours, not days.
 
+## Every deployment is its own track
+
+A CalTopo map that adds a live track stays subscribed to that call sign
+forever — with a fixed call sign, the dog reappears live on last month's
+incident map the next time you deploy (like an ADS-B plane that shows up
+whenever it flies). So the bridge mints a **dated device id per deployment**:
+when a deployment starts it appends the date, `{DEVICE_ID}-yymmdd`, e.g.
+call sign `TEAM1-Dog-260804`. `bridge.py --on` and `--status` print the
+day's call sign; that's what the team adds to the incident map.
+
+Old maps' subscriptions point at an id that never reports again, so CalTopo
+finalizes the live track into a plain line object ~24h after its last fix —
+a permanent record of that search, and nothing more ever draws on it. The
+date is taken in `BRIDGE_TZ` (default `America/Los_Angeles`) so the call
+sign matches the operational day, not UTC.
+
 ## How it works
 
 ```
@@ -48,8 +64,10 @@ Tractive collar -> Tractive event channel (push) -> bridge -> CalTopo live track
 
 In CalTopo: map → add **live track** → Track Details → Type
 `Fleet, Email, Other`. The **Call Sign** is the routing key — CalTopo splits it
-at the first hyphen as `{GROUP}-{DEVICE}` (e.g. `TEAM1-Dog`). The **Label** is
-what shows on the map, independent of the call sign.
+at the first hyphen as `{GROUP}-{DEVICE}` (e.g. `TEAM1-Dog-260804`, where the
+device id is `Dog-260804`). Use the day's call sign printed by `--on` /
+`--status`. The **Label** is what shows on the map, independent of the call
+sign.
 
 Notes learned in the field:
 

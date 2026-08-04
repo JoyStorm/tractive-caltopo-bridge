@@ -8,6 +8,12 @@ OFF BY DEFAULT. The switch is Tractive's own LIVE mode:
 - Turn LIVE off (app, or `bridge.py --off`) and the bridge goes silent.
   No positions are reported outside a deployment.
 
+Each deployment posts to a DATED device id ({DEVICE_ID}-yymmdd, minted when
+the deployment starts), so every deployment is its own CalTopo track. A map
+that subscribed to one deployment's call sign never sees the next one; the
+old live track finalizes into a plain line ~24h after its last fix. Date is
+taken in BRIDGE_TZ (default America/Los_Angeles).
+
 The worker holds Tractive's real-time event channel open, so the switch
 takes effect within seconds, and positions arrive pushed (no polling).
 While the bridge believes a deployment is on it re-issues the LIVE command
@@ -32,6 +38,8 @@ import os
 import signal
 import sys
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from aiotractive import Tractive
@@ -61,7 +69,9 @@ class Bridge:
         self.email = require_env("TRACTIVE_EMAIL")
         self.password = require_env("TRACTIVE_PASSWORD")
         self.group = require_env("CALTOPO_GROUP")
-        self.device_id = require_env("CALTOPO_DEVICE_ID")
+        self.device_base = require_env("CALTOPO_DEVICE_ID")
+        self.tz = os.environ.get("BRIDGE_TZ", "America/Los_Angeles")
+        self.device_id: str | None = None  # minted per deployment
         self.tracker_id = os.environ.get("TRACTIVE_TRACKER_ID", "").strip()
         self.keepalive_seconds = int(os.environ.get("KEEPALIVE_SECONDS", "240"))
         self.max_live_seconds = int(os.environ.get("MAX_LIVE_SECONDS", "28800"))
@@ -81,13 +91,19 @@ class Bridge:
             sys.exit(f"Multiple trackers found ({ids}) — set TRACTIVE_TRACKER_ID")
         return trackers[0]
 
+    def dated_device_id(self) -> str:
+        return f"{self.device_base}-{datetime.now(ZoneInfo(self.tz)).strftime('%y%m%d')}"
+
+    def call_sign(self, device_id: str) -> str:
+        return f"{self.group}-{device_id}"
+
     # ---- worker -----------------------------------------------------------
 
     async def run(self) -> None:
         LOG.info(
             "Bridge up — OFF by default; LIVE tracking is the switch "
-            "(feed %s-%s, keepalive %ss, max live %sh)",
-            self.group, self.device_id, self.keepalive_seconds,
+            "(feed %s-%s-yymmdd, keepalive %ss, max live %sh)",
+            self.group, self.device_base, self.keepalive_seconds,
             self.max_live_seconds // 3600,
         )
         while not self.stop.is_set():
@@ -123,12 +139,15 @@ class Bridge:
             if on and not self.deployment_on:
                 self.deployment_on = True
                 self.deployment_started = time.time()
-                LOG.info("DEPLOYMENT ON — LIVE tracking active, relaying to %s-%s",
-                         self.group, self.device_id)
+                self.device_id = self.dated_device_id()
+                LOG.info("DEPLOYMENT ON — LIVE tracking active, call sign %s",
+                         self.call_sign(self.device_id))
             elif not on and self.deployment_on:
                 self.deployment_on = False
                 self.deployment_started = None
-                LOG.info("DEPLOYMENT OFF — LIVE tracking ended, feed silent")
+                LOG.info("DEPLOYMENT OFF — LIVE tracking ended, feed silent "
+                         "(track %s is done)", self.call_sign(self.device_id or "?"))
+                self.device_id = None
 
         position = event.get("position")
         if position and self.deployment_on:
@@ -142,9 +161,10 @@ class Bridge:
         if fix_time == self.last_fix_time:
             return
         lat, lng = latlong[0], latlong[1]
+        device_id = self.device_id or self.dated_device_id()
         url = CALTOPO_URL.format(group=self.group)
         async with http.get(
-            url, params={"id": self.device_id, "lat": lat, "lng": lng}
+            url, params={"id": device_id, "lat": lat, "lng": lng}
         ) as resp:
             body = await resp.text()
             if resp.status == 200:
@@ -190,12 +210,15 @@ class Bridge:
             if mode == "on":
                 state = await tracker.set_live_tracking_active(True)
                 LOG.info("LIVE tracking ON requested: %s", state)
-                print("Deployment started — the worker will relay positions "
-                      "while LIVE stays on.")
+                print(f"Deployment started — today's call sign is "
+                      f"{self.call_sign(self.dated_device_id())}. Add it to the "
+                      "incident map as a live track (Fleet/Email/Other) EARLY; "
+                      "tracks do not backfill.")
             elif mode == "off":
                 state = await tracker.set_live_tracking_active(False)
                 LOG.info("LIVE tracking OFF requested: %s", state)
-                print("Deployment ended — feed is silent.")
+                print("Deployment ended — feed is silent. The track finalizes "
+                      "to a plain line on subscribed maps within ~24h.")
             elif mode == "status":
                 details = await tracker.details()
                 report = await tracker.pos_report()
@@ -203,6 +226,7 @@ class Bridge:
                 age = int(time.time() - report["time"]) if report.get("time") else None
                 print(f"tracker: {tracker._id}  state: {details.get('state')} "
                       f"({details.get('state_reason')})  battery: {details.get('battery_state')}")
+                print(f"today's call sign: {self.call_sign(self.dated_device_id())}")
                 if latlong:
                     print(f"last fix: {latlong[0]:.6f},{latlong[1]:.6f}  ({age}s ago)")
             elif mode == "once":
