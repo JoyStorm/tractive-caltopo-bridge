@@ -23,12 +23,12 @@ tracking is the on/off switch:
 This means the handler's existing muscle memory — opening Tractive on a
 callout — is the control surface. No extra app, no dashboard, works at 3am.
 
-Two protections are built in:
-
-- The bridge re-asserts LIVE during a deployment (Tractive times it out after
-  ~5 minutes otherwise), so a deployment started remotely stays on.
-- A hard cap (`MAX_LIVE_SECONDS`, default 8h) turns LIVE off if someone
-  forgets, because LIVE drains the collar battery in hours, not days.
+The bridge re-asserts LIVE during a deployment (Tractive times it out after
+~5 minutes otherwise), so **a deployment never times out mid-search** — LIVE
+stays on until someone turns it off in the app or runs `--off`. Know that
+LIVE drains the collar battery in hours, not days; the battery is the
+natural limit. If you'd rather have a hard auto-stop as battery protection,
+set `MAX_LIVE_SECONDS` (e.g. `28800` for 8h; `0` = no cap, the default).
 
 ## Every deployment is its own track
 

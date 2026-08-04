@@ -17,9 +17,10 @@ taken in BRIDGE_TZ (default America/Los_Angeles).
 The worker holds Tractive's real-time event channel open, so the switch
 takes effect within seconds, and positions arrive pushed (no polling).
 While the bridge believes a deployment is on it re-issues the LIVE command
-before Tractive's ~300s timeout expires, so LIVE started remotely (with no
-phone app keeping it alive) stays on — capped at MAX_LIVE_SECONDS (default
-8h) to protect the collar battery if someone forgets to turn it off.
+before Tractive's ~300s timeout expires, so LIVE stays on until someone
+turns it off (app or --off) — a deployment never times out mid-search. Set
+MAX_LIVE_SECONDS to add a hard battery-protection cap (0 = none, the
+default; the collar battery itself is the natural limit).
 
 Commands:
   bridge.py           run the relay worker (deploy this)
@@ -74,7 +75,7 @@ class Bridge:
         self.device_id: str | None = None  # minted per deployment
         self.tracker_id = os.environ.get("TRACTIVE_TRACKER_ID", "").strip()
         self.keepalive_seconds = int(os.environ.get("KEEPALIVE_SECONDS", "240"))
-        self.max_live_seconds = int(os.environ.get("MAX_LIVE_SECONDS", "28800"))
+        self.max_live_seconds = int(os.environ.get("MAX_LIVE_SECONDS", "0"))  # 0 = no cap
         self.deployment_on = False
         self.deployment_started: float | None = None
         self.last_fix_time: float | None = None
@@ -102,9 +103,9 @@ class Bridge:
     async def run(self) -> None:
         LOG.info(
             "Bridge up — OFF by default; LIVE tracking is the switch "
-            "(feed %s-%s-yymmdd, keepalive %ss, max live %sh)",
+            "(feed %s-%s-yymmdd, keepalive %ss, max live %s)",
             self.group, self.device_base, self.keepalive_seconds,
-            self.max_live_seconds // 3600,
+            f"{self.max_live_seconds // 3600}h" if self.max_live_seconds else "uncapped",
         )
         while not self.stop.is_set():
             try:
@@ -184,7 +185,7 @@ class Bridge:
                 if not self.deployment_on:
                     continue
                 elapsed = time.time() - (self.deployment_started or time.time())
-                if elapsed > self.max_live_seconds:
+                if self.max_live_seconds and elapsed > self.max_live_seconds:
                     LOG.warning(
                         "Deployment exceeded %sh — turning LIVE off to save collar battery",
                         self.max_live_seconds // 3600,
