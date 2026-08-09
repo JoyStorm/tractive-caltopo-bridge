@@ -65,6 +65,15 @@ LOG = logging.getLogger("bridge")
 
 CALTOPO_URL = "https://caltopo.com/api/v1/position/report/{group}"
 
+# One-off mid-day track splits, keyed by Pacific date (yymmdd). The dated call
+# sign alone can't start a second track on the same day, so an entry here adds
+# a suffix for that date only and the scheme reverts to the plain
+# <base>-yymmdd call sign at midnight without another deploy.
+# CALTOPO_TRACK_SUFFIX overrides this if set.
+TRACK_SUFFIXES = {
+    "260809": "b",  # search track split off from the drive-out track
+}
+
 
 def require_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
@@ -101,7 +110,10 @@ class Bridge:
         return trackers[0]
 
     def dated_device_id(self) -> str:
-        return f"{self.device_base}-{datetime.now(ZoneInfo(self.tz)).strftime('%y%m%d')}"
+        day = datetime.now(ZoneInfo(self.tz)).strftime("%y%m%d")
+        suffix = (os.environ.get("CALTOPO_TRACK_SUFFIX", "").strip()
+                  or TRACK_SUFFIXES.get(day, ""))
+        return f"{self.device_base}-{day}-{suffix}" if suffix else f"{self.device_base}-{day}"
 
     def call_sign(self, device_id: str) -> str:
         return f"{self.group}-{device_id}"
