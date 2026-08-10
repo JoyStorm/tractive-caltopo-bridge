@@ -75,6 +75,12 @@ TRACK_SUFFIXES = {
 }
 
 
+# A fix this fresh can only come from the ~4s LIVE clock; default mode is
+# ~2-3 min apart. Used both to adopt an in-progress deployment on boot and to
+# tell a deliberate LIVE-off from one caused by losing cell.
+LIVE_FIX_AGE_SECONDS = 20
+
+
 def require_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -93,7 +99,17 @@ class Bridge:
         self.tracker_id = os.environ.get("TRACTIVE_TRACKER_ID", "").strip()
         self.keepalive_seconds = int(os.environ.get("KEEPALIVE_SECONDS", "240"))
         self.max_live_seconds = int(os.environ.get("MAX_LIVE_SECONDS", "0"))  # 0 = no cap
-        self.deployment_on = False
+        # How often to re-arm LIVE after cell loss, and how long to keep trying
+        # before assuming the deployment is really over.
+        self.rearm_seconds = int(os.environ.get("REARM_SECONDS", "60"))
+        self.rearm_max_seconds = int(os.environ.get("REARM_MAX_SECONDS", "7200"))
+        # intent_on = a deployment is meant to be running (survives cell loss).
+        # live_active = LIVE is actually up right now. Losing cell clears the
+        # second, never the first — only an operator stop clears intent.
+        self.intent_on = False
+        self.live_active = False
+        self.lost_since: float | None = None
+        self.last_keepalive: float = 0.0
         self.deployment_started: float | None = None
         self.last_fix_time: float | None = None
         self.stop = asyncio.Event()
@@ -138,6 +154,7 @@ class Bridge:
     async def _session(self) -> None:
         async with Tractive(self.email, self.password) as client:
             tracker = await self.resolve_tracker(client)
+            await self._adopt_running_deployment(tracker)
             keepalive = asyncio.create_task(self._keepalive(tracker))
             try:
                 async with aiohttp.ClientSession() as http:
@@ -148,6 +165,30 @@ class Bridge:
             finally:
                 keepalive.cancel()
 
+    async def _adopt_running_deployment(self, tracker) -> None:
+        """Pick up a deployment that is already running when the worker boots.
+
+        LIVE state only ever arrives as an event, so a restart mid-deployment
+        (a redeploy, a crash) would otherwise leave the bridge silent until
+        someone toggled LIVE by hand. A fix on the 4s clock means it's live.
+        """
+        try:
+            report = await tracker.pos_report()
+        except Exception:
+            LOG.exception("Could not check for a running deployment on boot")
+            return
+        fix_time = report.get("time")
+        if not fix_time:
+            return
+        age = time.time() - fix_time
+        if age <= LIVE_FIX_AGE_SECONDS:
+            self.intent_on = True
+            self.live_active = True
+            self.deployment_started = time.time()
+            self.device_id = self.dated_device_id()
+            LOG.info("Adopted a deployment already in progress (fix %.0fs old) "
+                     "— call sign %s", age, self.call_sign(self.device_id))
+
     async def _handle_event(self, event: dict, http: aiohttp.ClientSession) -> None:
         if event.get("message") != "tracker_status":
             return
@@ -157,21 +198,48 @@ class Bridge:
         live = event.get("live_tracking")
         if live is not None:
             on = bool(live.get("active") or live.get("pending"))
-            if on and not self.deployment_on:
-                self.deployment_on = True
-                self.deployment_started = time.time()
-                self.device_id = self.dated_device_id()
-                LOG.info("DEPLOYMENT ON — LIVE tracking active, call sign %s",
-                         self.call_sign(self.device_id))
-            elif not on and self.deployment_on:
-                self.deployment_on = False
-                self.deployment_started = None
-                LOG.info("DEPLOYMENT OFF — LIVE tracking ended, feed silent "
-                         "(track %s is done)", self.call_sign(self.device_id or "?"))
-                self.device_id = None
+            if on:
+                if not self.intent_on:
+                    self.intent_on = True
+                    self.deployment_started = time.time()
+                    self.device_id = self.dated_device_id()
+                    LOG.info("DEPLOYMENT ON — LIVE tracking active, call sign %s",
+                             self.call_sign(self.device_id))
+                elif not self.live_active:
+                    offline = time.time() - (self.lost_since or time.time())
+                    LOG.info("LIVE RE-ARMED after %.0fs offline — same track %s",
+                             offline, self.call_sign(self.device_id or "?"))
+                self.live_active = True
+                self.lost_since = None
+            elif self.intent_on and self.live_active:
+                # Losing cell and being switched off both arrive as LIVE-off.
+                # Treat it as a stop only when the collar is demonstrably still
+                # reachable; otherwise the deployment stays armed and the
+                # keepalive keeps re-arming until coverage returns.
+                stale = (self.last_fix_time is None
+                         or time.time() - self.last_fix_time > LIVE_FIX_AGE_SECONDS)
+                if live.get("reconnecting") or stale:
+                    self.live_active = False
+                    self.lost_since = time.time()
+                    LOG.warning(
+                        "LIVE LOST (collar unreachable — no cell?) — track %s stays "
+                        "armed, re-arming every %ss for up to %.0f min",
+                        self.call_sign(self.device_id or "?"), self.rearm_seconds,
+                        self.rearm_max_seconds / 60)
+                else:
+                    LOG.info("DEPLOYMENT OFF — operator stop, feed silent "
+                             "(track %s is done)", self.call_sign(self.device_id or "?"))
+                    self.intent_on = False
+                    self.live_active = False
+                    self.lost_since = None
+                    self.deployment_started = None
+                    self.device_id = None
 
         position = event.get("position")
-        if position and self.deployment_on:
+        # Post whatever arrives while a deployment is armed: during a re-arm the
+        # collar reports at the coarse default interval, and a sparse track beats
+        # a dead one.
+        if position and self.intent_on:
             await self._post(position, http)
 
     async def _post(self, position: dict, http: aiohttp.ClientSession) -> None:
@@ -201,9 +269,33 @@ class Bridge:
         """Refresh LIVE while a deployment is on; hard-stop at max_live_seconds."""
         try:
             while True:
-                await asyncio.sleep(self.keepalive_seconds)
-                if not self.deployment_on:
+                # Poll at the re-arm cadence; a live deployment only needs a
+                # refresh every keepalive_seconds, but a lost one wants picking
+                # up the moment coverage returns.
+                await asyncio.sleep(min(self.rearm_seconds, self.keepalive_seconds))
+                if not self.intent_on:
                     continue
+                if not self.live_active:
+                    offline = time.time() - (self.lost_since or time.time())
+                    if offline > self.rearm_max_seconds:
+                        LOG.warning(
+                            "Giving up re-arming %s after %.0f min offline — "
+                            "deployment considered over",
+                            self.call_sign(self.device_id or "?"), offline / 60)
+                        self.intent_on = False
+                        self.lost_since = None
+                        self.device_id = None
+                        continue
+                    try:
+                        await tracker.set_live_tracking_active(True)
+                        LOG.info("Re-arm sent (%.0fs offline)", offline)
+                    except TractiveError:
+                        LOG.info("Re-arm failed — collar still unreachable "
+                                 "(%.0fs offline)", offline)
+                    continue
+                if time.time() - self.last_keepalive < self.keepalive_seconds:
+                    continue
+                self.last_keepalive = time.time()
                 elapsed = time.time() - (self.deployment_started or time.time())
                 if self.max_live_seconds and elapsed > self.max_live_seconds:
                     LOG.warning(
@@ -301,14 +393,31 @@ class Bridge:
                 report = await tracker.pos_report()
                 latlong = report.get("latlong")
                 age = int(time.time() - report["time"]) if report.get("time") else None
+                # details() carries no live_tracking field, so LIVE is inferred
+                # from the fix clock: 4s means LIVE, minutes means default mode.
+                if age is None:
+                    live = "UNKNOWN (no fix on record)"
+                elif age <= LIVE_FIX_AGE_SECONDS:
+                    live = f"ON (fix {age}s ago — 4s LIVE clock)"
+                elif details.get("state_reason") == "OFF_PET_POWER_SAVING":
+                    live = f"OFF — collar powered off or off the dog ({age // 60} min silent)"
+                else:
+                    live = (f"OFF or out of cell — last fix {age // 60} min ago "
+                            "(default-mode interval, not LIVE)")
+                try:
+                    pct = (await tracker.hw_info()).get("battery_level")
+                except Exception:
+                    pct = None
+                battery = f"{pct}%" if pct is not None else details.get("battery_state")
                 print(f"tracker: {tracker._id}  state: {details.get('state')} "
-                      f"({details.get('state_reason')})  battery: {details.get('battery_state')}")
+                      f"({details.get('state_reason')})  battery: {battery}")
+                print(f"LIVE: {live}")
                 print(f"today's call sign: {self.call_sign(self.dated_device_id())}")
                 if latlong:
                     print(f"last fix: {latlong[0]:.6f},{latlong[1]:.6f}  ({age}s ago)")
             elif mode == "once":
                 async with aiohttp.ClientSession() as http:
-                    self.deployment_on = True
+                    self.intent_on = True
                     await self._post(report_from(await tracker.pos_report()), http)
 
 
