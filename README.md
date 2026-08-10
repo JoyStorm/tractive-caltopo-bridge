@@ -23,12 +23,26 @@ tracking is the on/off switch:
 This means the handler's existing muscle memory — opening Tractive on a
 callout — is the control surface. No extra app, no dashboard, works at 3am.
 
-The bridge re-asserts LIVE during a deployment (Tractive times it out after
-~5 minutes otherwise), so **a deployment never times out mid-search** — LIVE
-stays on until someone turns it off in the app or runs `--off`. Know that
-LIVE drains the collar battery in hours, not days; the battery is the
-natural limit. If you'd rather have a hard auto-stop as battery protection,
-set `MAX_LIVE_SECONDS` (e.g. `28800` for 8h; `0` = no cap, the default).
+The bridge re-asserts LIVE during a deployment (Tractive times it out
+otherwise), so **a deployment never times out mid-search** — LIVE stays on
+until someone turns it off in the app or runs `--off`. If you'd rather have a
+hard auto-stop as battery protection, set `MAX_LIVE_SECONDS` (e.g. `28800`
+for 8h; `0` = no cap, the default).
+
+**Losing cell does not end a deployment.** Out of coverage, Tractive reports
+LIVE as off — indistinguishable from an operator switching it off. The bridge
+ends the deployment only when the collar is demonstrably still reachable (a
+fix newer than 20s and no `reconnecting` flag); otherwise it stays armed and
+re-arms every `REARM_SECONDS` (60) for up to `REARM_MAX_SECONDS` (7200) until
+coverage returns. The track id is preserved across the outage, so a reconnect
+continues the same CalTopo track rather than splitting it, and fixes are
+relayed whenever a deployment is armed — a coarse default-mode track beats a
+dead one. The worker also adopts a deployment already running when it boots,
+so a restart mid-search doesn't strand it.
+
+Note that no cell means no live track at all: the collar records offline at
+the coarse default interval (~2–3 min, not the 4s LIVE clock) and uploads
+later, so `--export` afterwards is the reliable record in backcountry terrain.
 
 ## Every deployment is its own track
 
