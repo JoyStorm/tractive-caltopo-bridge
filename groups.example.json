@@ -1,0 +1,25 @@
+{
+  "groups": [
+    {
+      "name": "SBSTAR",
+      "tractive_email": "sbstar-bridge@example.com",
+      "tractive_password_env": "SBSTAR_TRACTIVE_PASSWORD",
+      "caltopo_group_env": "SBSTAR_CALTOPO_KEY",
+      "callsign_secret_env": "SBSTAR_CALLSIGN_SECRET",
+      "tz": "America/Los_Angeles",
+      "notify": ["https://ntfy.sh/replace-with-a-long-random-topic"],
+      "auto_enroll": true,
+      "dogs": [
+        {"name": "Storm", "tracker_id": "ABCDEFGH"}
+      ]
+    },
+    {
+      "name": "TEAM2",
+      "tractive_email": "team2-bridge@example.com",
+      "tractive_password_env": "TEAM2_TRACTIVE_PASSWORD",
+      "caltopo_group_env": "TEAM2_CALTOPO_KEY",
+      "callsign_secret_env": "TEAM2_CALLSIGN_SECRET",
+      "notify": ["https://ntfy.sh/another-long-random-topic"]
+    }
+  ]
+}
