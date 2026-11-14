@@ -60,6 +60,47 @@ a permanent record of that search, and nothing more ever draws on it. The
 date is taken in `BRIDGE_TZ` (default `America/Los_Angeles`) so the call
 sign matches the operational day, not UTC.
 
+## Many teams, one worker
+
+One worker can serve any number of teams ("groups"). Each group is:
+
+- **one Tractive bridge account** (e.g. `sbstar-bridge@…`). Handlers *share*
+  their collar with it from the Tractive app; nobody hands over a password,
+  and a handler can unshare at any time. Each group holds its own Tractive
+  event channel, so one team's account being throttled or locked never
+  silences another team.
+- **one CalTopo group key** (the first call-sign segment) — ideally the
+  team's own CalTopo connect key, kept private.
+- **a call-sign secret**, which adds an unguessable tag to every call sign:
+  `KEY-Storm-261114-k3m9q`. The tag is derived from the collar and the date,
+  so a worker restart mid-search recomputes the same call sign (the track
+  never splits), but nobody can guess another dog's or another day's.
+- **notify URLs** (e.g. an [ntfy.sh](https://ntfy.sh) topic, Slack or Discord
+  webhook). When a deployment starts, the bridge pushes the call sign there
+  so the handler can paste it into the incident map — no typing a random
+  string at 3am.
+
+Configure groups in JSON (see `groups.example.json`) and point
+`BRIDGE_CONFIG` at it. Passwords, keys and secrets go in environment
+variables referenced by `*_env` fields, never in the file. With
+`auto_enroll` on (the default), any collar shared with a group's bridge
+account is relayed automatically under its Tractive pet name; it's picked up
+on the next reconnect after it's shared.
+
+**Who can see a dog:** anyone who opens a CalTopo map that has the dog's
+call sign added. So keep incident maps team-only by default and share a
+specific map with mutual-aid partners when they join. Handlers don't see each
+other's dogs in Tractive — they only share with the bridge account.
+
+**Before onboarding a team, test sharing:** share one collar with a bridge
+account and run `bridge.py --list` and `--status --dog NAME` against it.
+Tractive returns limited details for shared collars; confirm that positions
+arrive and that `--on` can switch LIVE from the shared account.
+
+Single-dog setups need no changes: with no `BRIDGE_CONFIG`, the original
+environment variables work exactly as before (set `CALLSIGN_SECRET` to opt
+into secured call signs).
+
 ## How it works
 
 ```
@@ -90,8 +131,10 @@ Notes learned in the field:
 - Any team member can add the call sign to their own map; the bridge doesn't
   know or care how many maps subscribe.
 - The endpoint has no authentication — the call sign is the only routing
-  secret. Off-by-default means it only matters during a deployment, but still
-  don't publish your real one.
+  secret. Anyone who knows it could watch the dog *or post fake positions
+  onto the incident map*. A readable pattern (`TEAM-Dog-yymmdd`) is
+  guessable, so set a call-sign secret: it adds an unguessable tag that
+  changes daily. The label shown on the map stays readable either way.
 
 ## Running
 
@@ -104,7 +147,15 @@ cp .env.example .env    # fill in credentials + call sign
 .venv/bin/python bridge.py --off      # end a deployment
 .venv/bin/python bridge.py --once     # post one fix (test the CalTopo side)
 .venv/bin/python bridge.py --export yesterday   # a day's track as GPX
+.venv/bin/python bridge.py --list               # groups, dogs, today's call signs
 ```
+
+With several dogs, pick one with `--dog NAME` (and `--group NAME` if two
+teams have a dog of the same name). Tests: `pip install -r
+requirements-dev.txt && pytest`.
+
+`aiotractive` is pinned below 2.0: version 2 removed the `trackers()` and
+`events()` calls this bridge is built on.
 
 `--export` pulls a day's recorded positions from Tractive's stored history
 (`today | yesterday | yymmdd | YYYY-MM-DD`; `--out PATH` to choose the file).
